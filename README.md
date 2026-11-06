@@ -52,10 +52,10 @@ Click a chapter to read it: the story, the mathematics, the experience data and 
 Each chapter follows the same path. The game then runs every product through one company.
 
 ```mermaid
-flowchart LR
+flowchart TB
     SQL["SQL<br/>experience data"] -->|"estimates and A/E"| R["R<br/>tested engine"]
     R <-->|"matches to the cent"| XL["Excel<br/>independent rebuild"]
-    R -->|"prices and reserves"| SIM["Company simulation<br/>20 years, thousands of lives"]
+    R -->|"prices and reserves"| SIM["Company simulation<br/>thousands of lives"]
     SIM --> GAME["Shiny game<br/>Lifetime Mutual"]
 ```
 
