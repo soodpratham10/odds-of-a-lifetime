@@ -9,6 +9,9 @@ source(find_file("r", "multistate.R"))
 source(find_file("r", "decrement.R"))
 source(find_file("r", "multilife.R"))
 source(find_file("r", "experience.R"))
+source(find_file("r", "reserves.R"))
+source(find_file("r", "expenses.R"))
+source(find_file("r", "simulate_company.R"))
 
 # Load experience data from SQLite, if the database has been built
 est <- NULL            # Chapter 1: estimated intensities
@@ -152,13 +155,434 @@ tab_couple <- tabPanel("Chapter 3: Two Lives",
                        )
 )
 
-ui <- fluidPage(
-  titlePanel("The Odds of a Lifetime", windowTitle = "The Odds of a Lifetime"),
-  p(em("One policy, every way a life can unfold.")),
-  tabsetPanel(tab_disability, tab_lapse, tab_couple)
+
+# =====================================================================
+# THE GAME: Lifetime Mutual
+# =====================================================================
+
+money_m <- function(x) {
+  ifelse(abs(x) >= 1e6, sprintf("%s$%.1fM", ifelse(x < 0, "-", ""), abs(x) / 1e6),
+         sprintf("%s$%s", ifelse(x < 0, "-", ""), formatC(abs(x), format = "f", digits = 0, big.mark = ",")))
+}
+
+# ---------- Game settings ----------
+I_PRICE <- 0.05          # interest rate used for pricing and reserves
+HORIZON <- 20            # years the game runs
+CAPITAL_SHARE <- 0.20    # starting capital: 20% of the fair premiums of the business
+ELASTICITY <- 4          # how strongly sales react to price
+OUTLOOK <- c("Low (3%)" = 0.03, "Expected (5%)" = 0.05, "High (6.5%)" = 0.065)
+
+# Costs of doing business (facts of the market, not choices)
+e_std <- expense_basis(init_pct = 0.5, renew_pct = 0.05, init_fixed = 200, renew_fixed = 50)
+e_annuity <- expense_basis(init_pct = 0.02, init_fixed = 500, renew_fixed = 50)
+
+# Product assumptions (the same defaults as the chapter calculators)
+mu_game <- matrix(c(0, 0.02, 0.01,
+                    0, 0,    0.05,
+                    0, 0,    0), nrow = 3, byrow = TRUE)
+k_term <- 0:19
+q_game <- udd_single_to_multiple(cbind(0.002 * 1.08^k_term, ifelse(k_term == 0, 0.10, 0.05)))
+qx_game <- makeham_q(65, 58)
+qy_game <- makeham_q(62, 58)
+
+pr_di <- price_disability(mu_game, 20, log(1 + I_PRICE), B = 12000, S = 50000, expenses = e_std)
+pr_term <- price_term(q_game, c(250000, 0), I_PRICE, e_std)
+pr_couple <- price_couple(qx_game, qy_game, I_PRICE, 20000, 0.6, e_annuity)
+
+products <- list(
+  di = list(name = "Disability Income", chapter = "Chapter 1: Detours", icon = "\U0001F3E5",
+            blurb = "Pays $12,000 a year while a customer is too sick to work, and $50,000 if they die. 20 years.",
+            unit = "a year", base = 5000,
+            fair = pr_di$G, epv_prem = pr_di$G * pr_di$a_hh),
+  term = list(name = "Term Life", chapter = "Chapter 2: Exits", icon = "\U0001F6E1",
+              blurb = "Pays a family $250,000 if the customer dies within 20 years. Customers can walk away at any time.",
+              unit = "a year", base = 5000,
+              fair = pr_term$G, epv_prem = pr_term$G * pr_term$a),
+  couple = list(name = "Couples Annuity", chapter = "Chapter 3: Two Lives", icon = "\U0001F491",
+                blurb = "A couple aged 65 and 62 pays once. You pay them $20,000 a year for life, and 60% to whoever lives longer.",
+                unit = "once", base = 500,
+                fair = pr_couple$G, epv_prem = pr_couple$G)
 )
 
-server <- function(input, output, session) {
+starting_capital <- function(chosen) {
+  CAPITAL_SHARE * sum(sapply(products[chosen], function(prod) prod$base * prod$epv_prem))
+}
+
+# Sell the policies, live through the years, and add everything up
+run_game <- function(chosen, price_pct, i_earn, seed) {
+  set.seed(seed)
+  tabs <- list()
+  info <- list()
+  for (id in chosen) {
+    prod <- products[[id]]
+    G <- prod$fair * price_pct[[id]] / 100
+    N <- sales_volume(G, prod$fair, base = prod$base, elasticity = ELASTICITY)
+    tabs[[id]] <- switch(id,
+      di = simulate_disability(N, mu_game, 20, 12000, 50000, G, e_std,
+                               I_PRICE, i_earn, horizon = HORIZON),
+      term = simulate_term(N, q_game, c(250000, 0), G, e_std,
+                           I_PRICE, i_earn, horizon = HORIZON),
+      couple = simulate_couples(N, qx_game, qy_game, 20000, 0.6, G, e_annuity,
+                                I_PRICE, i_earn, horizon = HORIZON))
+    info[[id]] <- list(G = G, N = N, pct = price_pct[[id]])
+  }
+  capital <- starting_capital(chosen)
+  list(co = run_company(tabs, capital, i_earn), tabs = tabs, info = info,
+       capital = capital, i_earn = i_earn)
+}
+
+status_colour <- c(Healthy = "#2a9d8f", Warning = "#e9a23b", Bankrupt = "#e63946")
+status_icon <- c(Healthy = "\U0001F7E2", Warning = "\U0001F7E1", Bankrupt = "\U0001F534")
+
+card <- function(...) div(class = "game-card", ...)
+
+game_css <- tags$style(HTML("
+  .game-card { border: 1px solid #dee2e6; border-radius: 12px; padding: 18px 20px;
+               margin-bottom: 16px; background: #ffffff; }
+  .game-hero { text-align: center; padding: 40px 10px 20px 10px; }
+  .game-hero h1 { font-size: 2.4em; margin-bottom: 0.4em; }
+  .game-hero p { font-size: 1.15em; max-width: 640px; margin: 0 auto 1em auto; }
+  .locked { opacity: 0.55; }
+  .meter { color: white; border-radius: 12px; padding: 14px 20px; font-size: 1.3em;
+           margin-bottom: 14px; }
+  .verdict { border-radius: 12px; padding: 18px 22px; margin-top: 10px;
+             border: 2px solid #dee2e6; }
+  .big-number { font-size: 1.8em; font-weight: bold; }
+  .shelf .checkbox { border: 1px solid #dee2e6; border-radius: 12px; padding: 12px 16px;
+                     margin-bottom: 10px; }
+  .shelf .checkbox label { width: 100%; }
+"))
+
+screen_welcome <- tabPanelBody("welcome",
+  div(class = "game-hero",
+      h1("\U0001F3E2 Lifetime Mutual"),
+      p(strong("You've just been made Chief Actuary.")),
+      p("Choose which insurance products to sell and set their prices. Then live through
+        the next 20 years with thousands of customers: some get sick, some die, some walk away,
+        and interest rates may not be kind."),
+      p("Price too low and the company goes bankrupt. Price too high and nobody buys."),
+      actionButton("go_shelf", "Start ▶", class = "btn-primary btn-lg"),
+      br(), br(),
+      p(em("An actuary works out what future promises cost today, using probability and interest.
+           That's the whole game."))
+  )
+)
+
+screen_shelf <- tabPanelBody("shelf",
+  h2("1. Choose what to sell"),
+  p("Each product is one chapter of the project. Pick one or more."),
+  div(class = "shelf",
+      checkboxGroupInput("chosen", NULL, width = "100%",
+        choiceNames = unname(lapply(products, function(prod) tagList(
+          strong(paste(prod$icon, prod$name)), tags$small(paste0("  (", prod$chapter, ")")), br(),
+          prod$blurb))),
+        choiceValues = names(products),
+        selected = names(products))
+  ),
+  div(class = "game-card locked", strong("\U0001F512 Company Pension (Chapter 4)"), br(),
+      "Run an employer's pension plan. Coming next."),
+  div(class = "game-card locked", strong("\U0001F512 Flexible Life (Chapter 6)"), br(),
+      "Customers choose what they pay. Coming later."),
+  div(class = "game-card locked", strong("\U0001F512 Guaranteed Product (Chapter 7)"), br(),
+      "A promise with a hidden cost. Coming later."),
+  actionButton("back_welcome", "◀ Back"),
+  actionButton("go_pricing", "Next: set prices ▶", class = "btn-primary")
+)
+
+screen_pricing <- tabPanelBody("pricing",
+  h2("2. Set your prices"),
+  uiOutput("capital_note"),
+  uiOutput("price_panels"),
+  card(
+    h4("\U0001F4C8 Interest rates over the next 20 years"),
+    p("You priced everything assuming your investments earn 5% a year. What actually happens?"),
+    radioButtons("outlook", NULL, choices = names(OUTLOOK), selected = "Expected (5%)", inline = TRUE)
+  ),
+  card(
+    h4("\U0001F9FE Your costs"),
+    p("Agents take 50% of the first year's premium and 5% after that. Each policy costs $200 to set up
+      and $50 a year to run. The annuity costs 2% of its premium plus $500 to set up, then $50 a year.
+      The fair price already includes these.")
+  ),
+  actionButton("back_shelf", "◀ Back"),
+  actionButton("run", "Run the 20 years ▶", class = "btn-primary btn-lg")
+)
+
+screen_years <- tabPanelBody("years",
+  h2("3. The next 20 years"),
+  uiOutput("meter"),
+  fluidRow(
+    column(7, plotOutput("company_plot", height = "330px")),
+    column(5, uiOutput("events"))
+  ),
+  uiOutput("verdict"),
+  br(),
+  actionButton("skip", "Skip to the end ⏩"),
+  actionButton("reroll", "Same prices, different luck \U0001F3B2"),
+  actionButton("again", "Change my prices ↩", class = "btn-primary"),
+  h4("The company's accounts"),
+  p(em("All amounts for the year. Reserves are the money that must be set aside for future promises;
+       surplus is what's left over.")),
+  tableOutput("year_table")
+)
+
+tab_game <- tabPanel("\U0001F3AE The Game",
+  game_css,
+  tabsetPanel(id = "screen", type = "hidden",
+              screen_welcome, screen_shelf, screen_pricing, screen_years)
+)
+
+tab_how <- tabPanel("\U0001F4D6 How it works",
+  h3("The maths behind the game"),
+  p("Every number in the game comes from the same tested R engine. The fair price is set by the
+    equivalence principle: the expected present value of premiums equals the expected present value
+    of benefits plus expenses. Each customer's life is then simulated at random, and the company holds
+    reserves (Thiele's equation for disability, the recursion for term life and the annuity)."),
+  p("Below are the calculators from the project, one per chapter. Change an assumption and see what
+    happens to the price."),
+  tabsetPanel(tab_disability, tab_lapse, tab_couple),
+  p(a("See the code and the maths on GitHub", href = "https://github.com/soodpratham10/odds-of-a-lifetime",
+      target = "_blank"))
+)
+
+game_server <- function(input, output, session) {
+  go <- function(screen) updateTabsetPanel(session, "screen", selected = screen)
+  observeEvent(input$go_shelf, go("shelf"))
+  observeEvent(input$back_welcome, go("welcome"))
+  observeEvent(input$back_shelf, go("shelf"))
+  observeEvent(input$go_pricing, {
+    if (length(input$chosen) == 0) {
+      showNotification("Pick at least one product to sell.", type = "warning")
+    } else {
+      go("pricing")
+    }
+  })
+
+  output$capital_note <- renderUI({
+    req(input$chosen)
+    card(p("The board gives you ", span(class = "big-number", money_m(starting_capital(input$chosen))),
+           " of starting capital for these products. Fair prices are worked out for you.
+           Move a slider to charge more or less than fair."))
+  })
+
+  output$price_panels <- renderUI({
+    req(input$chosen)
+    lapply(input$chosen, function(id) {
+      prod <- products[[id]]
+      card(
+        h4(paste(prod$icon, prod$name)),
+        sliderInput(paste0("price_", id), "Your price, as a % of the fair price",
+                    min = 70, max = 150, value = 100, step = 1, post = "%", width = "100%"),
+        uiOutput(paste0("price_info_", id))
+      )
+    })
+  })
+
+  for (id in names(products)) local({
+    pid <- id
+    output[[paste0("price_info_", pid)]] <- renderUI({
+      prod <- products[[pid]]
+      pct_val <- input[[paste0("price_", pid)]]
+      req(pct_val)
+      G <- prod$fair * pct_val / 100
+      N <- sales_volume(G, prod$fair, base = prod$base, elasticity = ELASTICITY)
+      tagList(
+        p(strong(paste0("Price: ", money(G), " ", prod$unit)),
+          paste0("   (fair price ", money(prod$fair), ")")),
+        p(paste0("Expected customers: ", formatC(N, format = "d", big.mark = ","),
+                 if (pct_val > 100) " (fewer buy when you charge more)"
+                 else if (pct_val < 100) " (more buy when you charge less)" else ""))
+      )
+    })
+  })
+
+  rv <- reactiveValues(res = NULL, year = 0, running = FALSE, prices = NULL)
+
+  start_run <- function() {
+    rv$res <- run_game(rv$prices$chosen, rv$prices$pct, OUTLOOK[[input$outlook]],
+                       seed = sample.int(1e6, 1))
+    rv$year <- 0
+    rv$running <- TRUE
+    go("years")
+  }
+
+  observeEvent(input$run, {
+    pct_list <- lapply(input$chosen, function(id) {
+      v <- input[[paste0("price_", id)]]
+      if (is.null(v)) 100 else v
+    })
+    names(pct_list) <- input$chosen
+    rv$prices <- list(chosen = input$chosen, pct = pct_list)
+    withProgress(message = "Simulating thousands of lives...", start_run())
+  })
+  observeEvent(input$reroll, {
+    req(rv$prices)
+    withProgress(message = "Simulating thousands of lives...", start_run())
+  })
+  observeEvent(input$again, go("pricing"))
+
+  # How far the story can go: the last year, or the year the company went bankrupt
+  last_year <- reactive({
+    req(rv$res)
+    co <- rv$res$co
+    bust <- match("Bankrupt", co$status)
+    if (is.na(bust)) nrow(co) else bust
+  })
+
+  observeEvent(input$skip, {
+    req(rv$res)
+    rv$year <- last_year()
+    rv$running <- FALSE
+  })
+
+  # Reveal one year at a time
+  observe({
+    req(rv$running)
+    invalidateLater(450)
+    isolate({
+      if (rv$year < last_year()) {
+        rv$year <- rv$year + 1
+      }
+      if (rv$year >= last_year()) rv$running <- FALSE
+    })
+  })
+
+  shown <- reactive({
+    req(rv$res, rv$year > 0)
+    rv$res$co[seq_len(rv$year), ]
+  })
+
+  output$meter <- renderUI({
+    req(rv$res)
+    if (rv$year == 0) {
+      return(div(class = "meter", style = "background:#457b9d;",
+                 paste("Year 0: you start with", money_m(rv$res$capital))))
+    }
+    row <- shown()[rv$year, ]
+    div(class = "meter", style = paste0("background:", status_colour[[row$status]], ";"),
+        paste0(status_icon[[row$status]], "  Year ", row$year, " of ", HORIZON, ": ", row$status,
+               "  |  Surplus ", money_m(row$surplus), "  |  Reserves ", money_m(row$reserve)))
+  })
+
+  output$company_plot <- renderPlot({
+    req(rv$res)
+    co <- rv$res$co
+    yr <- c(0, co$year)
+    top <- max(c(rv$res$capital, co$assets, co$reserve)) * 1.05
+    bottom <- min(0, co$assets[seq_len(last_year())])
+    par(mar = c(4, 5, 1, 1))
+    plot(NA, xlim = c(0, HORIZON), ylim = c(bottom, top) / 1e6,
+         xlab = "Year", ylab = "$ millions", las = 1)
+    abline(h = 0, col = "grey70")
+    if (rv$year > 0) {
+      k <- 0:rv$year
+      a <- c(rv$res$capital, co$assets[seq_len(rv$year)]) / 1e6
+      r <- c(0, co$reserve[seq_len(rv$year)]) / 1e6
+      polygon(c(k, rev(k)), c(a, rev(r)), col = adjustcolor("#2a9d8f", 0.15), border = NA)
+      lines(k, a, lwd = 3, col = "#2a9d8f")
+      lines(k, r, lwd = 3, col = "#e76f51")
+    }
+    legend("topleft", legend = c("Assets (what the company owns)", "Reserves (what it must hold)",
+                                 "Shaded gap = surplus"),
+           col = c("#2a9d8f", "#e76f51", adjustcolor("#2a9d8f", 0.3)), lwd = c(3, 3, 10), bty = "n")
+  })
+
+  output$events <- renderUI({
+    req(rv$res)
+    if (rv$year == 0) return(card(p("Starting the clock...")))
+    co <- shown()
+    msgs <- list()
+    for (k in seq_len(nrow(co))) {
+      if (co$status[k] == "Warning" && (k == 1 || co$status[k - 1] == "Healthy")) {
+        msgs[[length(msgs) + 1]] <- paste0("Year ", k, ": \U0001F7E1 the surplus is thin. The regulator is watching.")
+      }
+      if (co$status[k] == "Healthy" && k > 1 && co$status[k - 1] == "Warning") {
+        msgs[[length(msgs) + 1]] <- paste0("Year ", k, ": \U0001F7E2 back to healthy.")
+      }
+      if (co$status[k] == "Bankrupt") {
+        msgs[[length(msgs) + 1]] <- paste0("Year ", k, ": \U0001F534 assets fell below reserves. The regulator shuts the company.")
+      }
+    }
+    worst <- which.min(co$profit)
+    if (co$profit[worst] < 0) {
+      msgs[[length(msgs) + 1]] <- paste0("Worst year so far: year ", worst, ", a loss of ",
+                                         money_m(-co$profit[worst]), ".")
+    }
+    if (length(msgs) == 0) msgs <- list("So far, so good.")
+    card(h4("What happened"), tags$ul(lapply(msgs, tags$li)))
+  })
+
+  output$verdict <- renderUI({
+    req(rv$res, !rv$running, rv$year > 0)
+    res <- rv$res
+    co <- res$co
+    final <- co[rv$year, ]
+    bank <- res$capital * (1 + res$i_earn)^rv$year
+    reasons <- lapply(names(res$info), function(id) {
+      inf <- res$info[[id]]
+      nm <- products[[id]]$name
+      cust <- formatC(inf$N, format = "d", big.mark = ",")
+      if (inf$pct < 97) {
+        paste0(nm, ": priced ", 100 - inf$pct, "% below fair, so each policy loses money on average, and the low price brought in ",
+               cust, " customers.")
+      } else if (inf$pct > 103) {
+        paste0(nm, ": priced ", inf$pct - 100, "% above fair, so each policy makes money on average, but only ",
+               cust, " customers bought.")
+      } else {
+        paste0(nm, ": priced at fair, so it breaks even on average (", cust, " customers). Any gain or loss here is luck.")
+      }
+    })
+    if (res$i_earn < I_PRICE) {
+      reasons[[length(reasons) + 1]] <- paste0("Interest: you earned ", res$i_earn * 100,
+        "% instead of the 5% you priced with, so investment income fell short every year.")
+    } else if (res$i_earn > I_PRICE) {
+      reasons[[length(reasons) + 1]] <- paste0("Interest: you earned ", res$i_earn * 100,
+        "% instead of 5%, a tailwind every year.")
+    }
+    if (final$status == "Bankrupt") {
+      headline <- h3(paste0("❌ Bankrupt in year ", final$year))
+      border <- status_colour[["Bankrupt"]]
+      score <- p("The company could no longer cover its promises to customers.")
+    } else {
+      gain <- final$surplus - bank
+      headline <- h3(paste0("✅ Survived all ", HORIZON, " years"))
+      border <- status_colour[["Healthy"]]
+      score <- p("Final surplus ", strong(money_m(final$surplus)), ". Left in the bank, the starting capital would have grown to ",
+                 money_m(bank), ", so the business ", if (gain >= 0) "added " else "cost ",
+                 span(class = "big-number", money_m(abs(gain))), ".")
+    }
+    div(class = "verdict", style = paste0("border-color:", border, ";"),
+        headline, score, h4("Why"), tags$ul(lapply(reasons, tags$li)))
+  })
+
+  output$year_table <- renderTable({
+    co <- shown()
+    data.frame(
+      Year = co$year,
+      Premiums = money_m(co$premiums),
+      Claims = money_m(co$claims),
+      Expenses = money_m(co$expenses),
+      Interest = money_m(co$interest),
+      Reserves = money_m(co$reserve),
+      Surplus = money_m(co$surplus),
+      Profit = money_m(co$profit),
+      Status = paste(status_icon[co$status], co$status),
+      check.names = FALSE
+    )
+  }, align = "r")
+}
+
+# ---------- The page ----------
+ui <- navbarPage(
+  title = "The Odds of a Lifetime",
+  windowTitle = "The Odds of a Lifetime",
+  theme = bslib::bs_theme(bootswatch = "flatly"),
+  tab_game,
+  tab_how
+)
+
+# The chapter calculators (now inside "How it works")
+calculator_server <- function(input, output, session) {
   
   # ----- Chapter 1 -----
   calc <- reactive({
@@ -384,6 +808,11 @@ server <- function(input, output, session) {
              col = c("#2a9d8f", "#e9c46a"), pch = 19, lwd = 2)
     })
   }
+}
+
+server <- function(input, output, session) {
+  game_server(input, output, session)
+  calculator_server(input, output, session)
 }
 
 shinyApp(ui, server)

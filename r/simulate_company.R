@@ -2,7 +2,10 @@
 # Each product simulation returns one row per year with:
 #   premiums, expenses, claims  money in and out during the year (face amounts)
 #   net_flow                    the same flows, rolled up with interest to the end of the year
-#   reserve                     reserves held at the end of the year (never below zero)
+#   reserve                     reserves held at the end of the year for the whole block.
+#                               A single policy can have a negative reserve (it is expected to
+#                               pay in more than it costs), but the block's total is never
+#                               allowed below zero: future profits cannot be counted as assets.
 #   in_force                    customers still covered at the end of the year
 # run_company() then adds the products together with the company's capital.
 # Needs multistate.R, decrement.R, multilife.R, reserves.R and expenses.R.
@@ -107,7 +110,7 @@ simulate_disability <- function(N, mu, n, B, S, G, expenses, i_val, i_earn,
     if (k < n) {
       n_h <- sum(t_h > k)
       n_d <- sum(dis & t_h <= k & t_d > k)
-      reserve <- n_h * max(V[k + 1, 1], 0) + n_d * max(V[k + 1, 2], 0)
+      reserve <- max(n_h * V[k + 1, 1] + n_d * V[k + 1, 2], 0)
     } else {
       n_h <- 0
       n_d <- 0
@@ -173,9 +176,9 @@ simulate_couples <- function(N, qx, qy, amount, share, G, expenses, i_val, i_ear
     x_alive <- x_alive & runif(N) >= qx[k]
     y_alive <- y_alive & runif(N) >= qy[k]
     r <- V[k + 1, ]
-    reserve <- sum(x_alive & y_alive) * max(r["both"], 0) +
-      sum(x_alive & !y_alive) * max(r["x_only"], 0) +
-      sum(!x_alive & y_alive) * max(r["y_only"], 0)
+    reserve <- max(sum(x_alive & y_alive) * r["both"] +
+                     sum(x_alive & !y_alive) * r["x_only"] +
+                     sum(!x_alive & y_alive) * r["y_only"], 0)
     rows[k, ] <- c(premiums, expenses_k, claims, net, reserve, sum(x_alive | y_alive))
   }
   as_year_table(rows)
