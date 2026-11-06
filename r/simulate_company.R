@@ -231,7 +231,7 @@ simulate_term <- function(N, q, b, G, expenses, i_val, i_earn,
 # while both are alive and share * amount while one is alive.
 # Expenses: init_fixed + init_pct G at the start; renew_fixed per year from year 2.
 # qx, qy: death rates up to the end of the annuity (the reserves need the full length).
-simulate_couples <- function(N, qx, qy, amount, share, G, expenses, i_val, i_earn,
+simulate_couple_annuity <- function(N, qx, qy, amount, share, G, expenses, i_val, i_earn,
                              horizon = 20, seed = NULL, shock = make_shock(horizon)) {
   if (!is.null(seed)) set.seed(seed)
   e <- expenses

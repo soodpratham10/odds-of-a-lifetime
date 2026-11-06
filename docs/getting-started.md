@@ -2,26 +2,31 @@
 
 # Getting started
 
-Everything you need to run The Odds of a Lifetime on your own computer. If you just want to try it, the **[live calculator](https://soodpratham10.shinyapps.io/odds-of-a-lifetime/)** needs no installation.
+Everything you need to run The Odds of a Lifetime on your own computer. If you just want to play, the **[live game](https://soodpratham10.shinyapps.io/odds-of-a-lifetime/)** needs no installation.
 
 ## 1. Install the packages
 
 ```r
-install.packages(c("testthat", "DBI", "RSQLite", "shiny"))
+install.packages(c("testthat", "DBI", "RSQLite", "shiny", "bslib"))
 ```
 
 ## 2. Run the tests
 
-From the project folder in R:
+From the `tests` folder in R:
 
 ```r
-testthat::test_file("tests/test_multistate.R")
-testthat::test_file("tests/test_experience.R")
-testthat::test_file("tests/test_decrement.R")
-testthat::test_file("tests/test_multilife.R")
+setwd("tests")
+testthat::test_file("test_multistate.R")    # Chapter 1          22 tests
+testthat::test_file("test_experience.R")    # experience data    35 tests
+testthat::test_file("test_decrement.R")     # Chapter 2          16 tests
+testthat::test_file("test_multilife.R")     # Chapter 3          16 tests
+testthat::test_file("test_reserves.R")      # reserves           21 tests
+testthat::test_file("test_expenses.R")      # gross premiums     11 tests
+testthat::test_file("test_simulate.R")      # the game engine    55 tests
+setwd("..")
 ```
 
-Every file should report `FAIL 0`.
+Every file should report `FAIL 0`: 176 tests in all. The game engine file takes a little longer, because it simulates 20,000 customers a few times.
 
 ## 3. Build the experience database
 
@@ -50,7 +55,7 @@ couples <- simulate_couples(qx, qy, n = 20000, seed = 2026, age_x = 65, age_y = 
 DBI::dbDisconnect(write_couple_db(couples, db))
 ```
 
-## 4. Open the calculator
+## 4. Open the game
 
 ```r
 shiny::runApp("app")
@@ -63,17 +68,19 @@ shiny::runApp("app")
 | [1. Detours](chapters/01-detours.md) | `r/multistate.R` | `r/experience.R`, `sql/schema.sql`, `sql/exposure.sql`, `sql/transitions.sql` | `excel/disability_death_crosscheck.xlsx` |
 | [2. Exits](chapters/02-exits.md) | `r/decrement.R` | `r/experience.R`, `sql/policy_schema.sql`, `sql/exit_study.sql` | `excel/exits_crosscheck.xlsx` |
 | [3. Two Lives](chapters/03-two-lives.md) | `r/multilife.R` | `r/experience.R`, `sql/couple_schema.sql`, `sql/couple_study.sql` | `excel/two_lives_crosscheck.xlsx` |
+| [The game](the-game.md) | `r/reserves.R`, `r/expenses.R`, `r/simulate_company.R` | Actual vs expected each year, inside the simulation | |
 
 ## Repository layout
 
 ```
-r/          the engine, one file per chapter, plus the experience-data functions
+r/          the engine: one file per chapter, reserves, expenses, the company simulation
+            and the experience-data functions
 sql/        database schemas and experience-study queries
 excel/      one independent cross-check workbook per chapter
 tests/      automated tests with hand-checked expected values
-app/        the calculator
+app/        the game (with the chapter calculators under "How it works")
 docs/       chapter pages, this guide and images
-deploy.R    publishes the calculator to shinyapps.io
+deploy.R    publishes the game to shinyapps.io
 ```
 
 ---

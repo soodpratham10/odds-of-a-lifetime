@@ -112,7 +112,7 @@ test_that("couples simulation at the fair price breaks even on average", {
   e <- expense_basis(init_pct = 0.02, init_fixed = 500, renew_fixed = 50)
   pc <- price_couple(qx, qy, 0.045, 18000, 0.6, e)
   expect_equal(pc$G, 263490.49, tolerance = 1e-6)
-  s <- simulate_couples(20000, qx, qy, 18000, 0.6, pc$G, e, 0.045, 0.045,
+  s <- simulate_couple_annuity(20000, qx, qy, 18000, 0.6, pc$G, e, 0.045, 0.045,
                         horizon = 56, seed = 1)
   pv <- sum(s$net_flow * 1.045^-(1:56)) / 20000
   expect_true(abs(pv) < 0.01 * pc$G)
@@ -185,7 +185,7 @@ test_that("couples customer stories add up to the yearly accounts", {
   qx <- makeham_q(65, 58)
   qy <- makeham_q(62, 58)
   e <- expense_basis(init_pct = 0.02, init_fixed = 500, renew_fixed = 50)
-  s <- simulate_couples(400, qx, qy, 20000, 0.6, 290000, e, 0.05, 0.05, seed = 4)
+  s <- simulate_couple_annuity(400, qx, qy, 20000, 0.6, 290000, e, 0.05, 0.05, seed = 4)
   people <- attr(s, "people")
   expect_equal(sum(people$benefits), sum(s$claims))
   expect_equal(sum(!is.na(people$x_died)) + sum(!is.na(people$y_died)), sum(s$events))

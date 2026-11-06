@@ -257,7 +257,7 @@ run_game <- function(chosen, price_pct, outlook, seed, hard = FALSE) {
                                I_PRICE, i_path, horizon = HORIZON, shock = shock_tab),
       term = simulate_term(N, q_game, c(250000, 0), G, e_std,
                            I_PRICE, i_path, horizon = HORIZON, shock = shock_tab),
-      couple = simulate_couples(N, qx_game, qy_game, 20000, 0.6, G, e_annuity,
+      couple = simulate_couple_annuity(N, qx_game, qy_game, 20000, 0.6, G, e_annuity,
                                 I_PRICE, i_path, horizon = HORIZON, shock = shock_tab))
     info[[id]] <- list(G = G, N = N, pct = price_pct[[id]])
   }
