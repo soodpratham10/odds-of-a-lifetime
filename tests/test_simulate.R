@@ -119,3 +119,74 @@ test_that("couples simulation at the fair price breaks even on average", {
   expect_equal(s$premiums[1], 20000 * pc$G)
   expect_true(all(s$reserve >= 0))
 })
+
+# ---------- Shocks, interest by year, A/E and customer stories ----------
+
+test_that("make_shock changes only the chosen year", {
+  s <- make_shock(5, year = 3, death = 2, lapse = 4)
+  expect_equal(s$death, c(1, 1, 2, 1, 1))
+  expect_equal(s$lapse, c(1, 1, 4, 1, 1))
+  expect_equal(s$disable, rep(1, 5))
+})
+
+test_that("interest can change from year to year", {
+  q <- matrix(0, nrow = 3, ncol = 2)
+  e <- expense_basis(init_pct = 0.5, renew_pct = 0.05, init_fixed = 10, renew_fixed = 2)
+  s <- simulate_term(10, q, c(1000, 0), G = 100, expenses = e, i_val = 0.05,
+                     i_earn = c(0.05, 0.10, 0))
+  # 400 * 1.05, 930 * 1.10, 930 * 1
+  expect_equal(s$net_flow, c(420, 1023, 930))
+  p <- data.frame(year = 1:2, premiums = c(500, 0), expenses = c(100, 0),
+                  claims = c(300, 50), net_flow = c(100, -50),
+                  reserve = c(300, 0), in_force = c(10, 0))
+  # A1 = 1000 * 1.1 + 100 = 1200; A2 = 1200 * 1.2 - 50 = 1390
+  expect_equal(run_company(list(p), 1000, c(0.1, 0.2))$assets, c(1200, 1390))
+})
+
+test_that("a shock that removes deaths in one year leaves no claims that year", {
+  q <- cbind(rep(0.1, 3), 0)
+  e <- expense_basis()
+  s <- simulate_term(5000, q, c(1000, 0), G = 100, expenses = e, i_val = 0.05,
+                     i_earn = 0.05, seed = 3, shock = make_shock(3, year = 2, death = 0))
+  expect_equal(s$claims[2], 0)
+  expect_equal(s$events[2], 0)
+  # the model still expected 10% of those in force at the start of year 2 to die
+  expect_equal(s$expected_events[2], 0.1 * s$in_force[1])
+  expect_true(s$events[1] > 0)
+})
+
+test_that("term customer stories add up to the yearly accounts", {
+  k <- 0:19
+  q <- udd_single_to_multiple(cbind(0.003 * 1.07^k, ifelse(k == 0, 0.08, 0.04)))
+  e <- expense_basis(init_pct = 0.5, renew_pct = 0.05, init_fixed = 150, renew_fixed = 40)
+  s <- simulate_term(3000, q, c(100000, 0), 586, e, 0.04, 0.04, seed = 2)
+  people <- attr(s, "people")
+  expect_equal(nrow(people), 3000)
+  expect_equal(sum(people$exit == "died"), sum(s$events))
+  expect_equal(sum(people$exit == "still covered"), s$in_force[20])
+  expect_equal(sum(people$premiums), sum(s$premiums))
+  expect_equal(sum(people$benefits), sum(s$claims))
+})
+
+test_that("disability customer stories add up, and a shock can stop new claims", {
+  s <- simulate_disability(3000, mu, 10, 10000, 20000, pr$G, e_di, 0.04, 0.04, seed = 5)
+  people <- attr(s, "people")
+  expect_equal(sum(people$premiums), sum(s$premiums))
+  expect_equal(sum(people$benefits), sum(s$claims))
+  expect_equal(sum(!is.na(people$sick_at)), sum(s$events))
+  s0 <- simulate_disability(3000, mu, 10, 10000, 20000, pr$G, e_di, 0.04, 0.04, seed = 5,
+                            shock = make_shock(10, year = 1, disable = 0))
+  expect_equal(s0$events[1], 0)
+  # expected new claims in year 1: 3000 * 0.03/0.04 * (1 - exp(-0.04))
+  expect_equal(s0$expected_events[1], 3000 * 0.75 * (1 - exp(-0.04)))
+})
+
+test_that("couples customer stories add up to the yearly accounts", {
+  qx <- makeham_q(65, 58)
+  qy <- makeham_q(62, 58)
+  e <- expense_basis(init_pct = 0.02, init_fixed = 500, renew_fixed = 50)
+  s <- simulate_couples(400, qx, qy, 20000, 0.6, 290000, e, 0.05, 0.05, seed = 4)
+  people <- attr(s, "people")
+  expect_equal(sum(people$benefits), sum(s$claims))
+  expect_equal(sum(!is.na(people$x_died)) + sum(!is.na(people$y_died)), sum(s$events))
+})

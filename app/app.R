@@ -156,14 +156,17 @@ tab_couple <- tabPanel("Chapter 3: Two Lives",
 )
 
 
+
 # =====================================================================
 # THE GAME: Lifetime Mutual
 # =====================================================================
 
+# Money in millions with one decimal, e.g. $902,594 -> $0.9M, -4,100,000 -> -$4.1M
 money_m <- function(x) {
-  ifelse(abs(x) >= 1e6, sprintf("%s$%.1fM", ifelse(x < 0, "-", ""), abs(x) / 1e6),
-         sprintf("%s$%s", ifelse(x < 0, "-", ""), formatC(abs(x), format = "f", digits = 0, big.mark = ",")))
+  sprintf("%s$%.1fM", ifelse(x < 0, "-", ""), abs(x) / 1e6)
 }
+# Whole dollars, e.g. 15400.4 -> $15,400
+money0 <- function(x) paste0("$", formatC(x, format = "f", digits = 0, big.mark = ","))
 
 # ---------- Game settings ----------
 I_PRICE <- 0.05          # interest rate used for pricing and reserves
@@ -208,9 +211,41 @@ starting_capital <- function(chosen) {
   CAPITAL_SHARE * sum(sapply(products[chosen], function(prod) prod$base * prod$epv_prem))
 }
 
-# Sell the policies, live through the years, and add everything up
-run_game <- function(chosen, price_pct, i_earn, seed) {
+# ---------- Hard mode: one surprise event ----------
+SHOCKS <- list(
+  pandemic = list(death = 3, disable = 1, lapse = 1, crash = FALSE,
+                  headline = "PANDEMIC: death rates triple this year",
+                  why = "a pandemic tripled death rates. Bad for Term Life and death benefits, but good for the annuity, which stops paying when people die."),
+  sickness = list(death = 1, disable = 3, lapse = 1, crash = FALSE,
+                  headline = "SICKNESS WAVE: three times as many people too ill to work",
+                  why = "a sickness wave tripled new disability claims, and each one pays out for years."),
+  lapses = list(death = 1, disable = 1, lapse = 4, crash = FALSE,
+                headline = "CUSTOMERS FLEE: a rival cuts prices and lapses quadruple",
+                why = "a rival's price cut made four times as many Term Life customers walk away."),
+  crash = list(death = 1, disable = 1, lapse = 1, crash = TRUE,
+               headline = "MARKET CRASH: interest rates fall 3 points for good",
+               why = "a market crash cut the interest you earn by 3 points for the rest of the game.")
+)
+
+# Sell the policies, live through the years, and add everything up.
+# The game number is the random seed, so the same number replays the same luck.
+run_game <- function(chosen, price_pct, outlook, seed, hard = FALSE) {
   set.seed(seed)
+  i_path <- rep(outlook, HORIZON)
+  shock_tab <- make_shock(HORIZON)
+  shock <- NULL
+  if (hard) {
+    # only surprises that can affect the products on sale
+    available <- c("pandemic", "crash", if ("di" %in% chosen) "sickness",
+                   if ("term" %in% chosen) "lapses")
+    type <- sample(available, 1)
+    yr <- sample(5:14, 1)
+    s <- SHOCKS[[type]]
+    shock_tab <- make_shock(HORIZON, year = yr, death = s$death, disable = s$disable,
+                            lapse = s$lapse)
+    if (s$crash) i_path[yr:HORIZON] <- pmax(outlook - 0.03, 0.005)
+    shock <- list(type = type, year = yr, headline = s$headline, why = s$why)
+  }
   tabs <- list()
   info <- list()
   for (id in chosen) {
@@ -219,39 +254,225 @@ run_game <- function(chosen, price_pct, i_earn, seed) {
     N <- sales_volume(G, prod$fair, base = prod$base, elasticity = ELASTICITY)
     tabs[[id]] <- switch(id,
       di = simulate_disability(N, mu_game, 20, 12000, 50000, G, e_std,
-                               I_PRICE, i_earn, horizon = HORIZON),
+                               I_PRICE, i_path, horizon = HORIZON, shock = shock_tab),
       term = simulate_term(N, q_game, c(250000, 0), G, e_std,
-                           I_PRICE, i_earn, horizon = HORIZON),
+                           I_PRICE, i_path, horizon = HORIZON, shock = shock_tab),
       couple = simulate_couples(N, qx_game, qy_game, 20000, 0.6, G, e_annuity,
-                                I_PRICE, i_earn, horizon = HORIZON))
+                                I_PRICE, i_path, horizon = HORIZON, shock = shock_tab))
     info[[id]] <- list(G = G, N = N, pct = price_pct[[id]])
   }
   capital <- starting_capital(chosen)
-  list(co = run_company(tabs, capital, i_earn), tabs = tabs, info = info,
-       capital = capital, i_earn = i_earn)
+  res <- list(co = run_company(tabs, capital, i_path), tabs = tabs, info = info,
+              capital = capital, i_path = i_path, outlook = outlook, shock = shock,
+              hard = hard)
+  res$stories <- pick_stories(res)
+  res
+}
+
+# ---------- Customer stories ----------
+yr_of <- function(t) ceiling(t)      # a time of 6.3 years happens in year 7
+
+pick_stories <- function(res) {
+  cand <- list()
+  add <- function(key, text) cand[[key]] <<- text
+  pick <- function(ids) if (length(ids) == 1) ids else sample(ids, 1)
+  if (!is.null(res$tabs$di)) {
+    pe <- attr(res$tabs$di, "people")
+    sick <- which(!is.na(pe$sick_at))
+    if (length(sick) > 0) {
+      r <- pe[pick(sick), ]
+      ending <- if (!is.na(r$died_at)) paste0(" and died in year ", yr_of(r$died_at),
+                                              ". Their family received $50,000.")
+                else " and was still too ill to work when the policy ended."
+      add("di_a", paste0("\U0001F3E5 Customer #", r$id, " (Disability Income) got sick in year ",
+                         yr_of(r$sick_at), ending, " They paid you ", money0(r$premiums),
+                         " in premiums; you paid them ", money0(r$benefits),
+                         ". This is what insurance is for."))
+    }
+    well <- which(is.na(pe$sick_at) & is.na(pe$died_at))
+    if (length(well) > 0) {
+      r <- pe[pick(well), ]
+      add("di_b", paste0("\U0001F3C3 Customer #", r$id, " (Disability Income) stayed healthy for all ",
+                         HORIZON, " years and never claimed. Their ", money0(r$premiums),
+                         " in premiums helped pay for the customers who did get sick."))
+    }
+  }
+  if (!is.null(res$tabs$term)) {
+    pe <- attr(res$tabs$term, "people")
+    died <- which(pe$exit == "died")
+    if (length(died) > 0) {
+      r <- pe[pick(died), ]
+      add("term_a", paste0("\U0001F56F Customer #", r$id, " (Term Life) died in year ", r$exit_year,
+                           ". They had paid ", money0(r$premiums), ", and their family received ",
+                           money0(r$benefits), "."))
+    }
+    lapsed <- which(pe$exit == "lapsed")
+    if (length(lapsed) > 0) {
+      r <- pe[pick(lapsed), ]
+      add("term_b", paste0("\U0001F6AA Customer #", r$id, " (Term Life) walked away in year ", r$exit_year,
+                           " after paying ", money0(r$premiums),
+                           ". No payout. The price already assumed some customers would leave."))
+    }
+  }
+  if (!is.null(res$tabs$couple)) {
+    pe <- attr(res$tabs$couple, "people")
+    one <- which(xor(is.na(pe$x_died), is.na(pe$y_died)))
+    if (length(one) > 0) {
+      r <- pe[pick(one), ]
+      who <- if (!is.na(r$x_died)) "the older partner (65)" else "the younger partner (62)"
+      yr <- if (!is.na(r$x_died)) r$x_died else r$y_died
+      add("couple_a", paste0("\U0001F491 Couple #", r$id, " (Couples Annuity): ", who, " died in year ", yr,
+                             ". The survivor kept getting 60%, $12,000 a year. You paid them ",
+                             money0(r$benefits), " in total against one premium of ", money0(r$premiums), "."))
+    }
+    both <- which(is.na(pe$x_died) & is.na(pe$y_died))
+    if (length(both) > 0) {
+      r <- pe[pick(both), ]
+      add("couple_b", paste0("\U0001F475 Couple #", r$id, " (Couples Annuity) are both still alive after ",
+                             HORIZON, " years. You've paid them ", money0(r$benefits),
+                             " so far, and the payments carry on."))
+    }
+  }
+  order <- c("di_a", "term_a", "couple_a", "di_b", "term_b", "couple_b")
+  unname(unlist(cand[intersect(order, names(cand))]))[seq_len(min(3, length(cand)))]
+}
+
+# ---------- The Daily Actuary: headlines for one year ----------
+headlines_for_year <- function(res, k) {
+  co <- res$co
+  out <- character(0)
+  if (!is.null(res$shock) && res$shock$year == k) out <- c(out, paste("\u26A1", res$shock$headline))
+  if (co$status[k] == "Bankrupt") out <- c(out, "\U0001F534 LIFETIME MUTUAL COLLAPSES: regulator steps in")
+  if (co$status[k] == "Warning" && (k == 1 || co$status[k - 1] == "Healthy"))
+    out <- c(out, "\U0001F7E1 Regulator raises concerns over Lifetime Mutual's thin surplus")
+  if (k > 1 && co$status[k] == "Healthy" && co$status[k - 1] == "Warning")
+    out <- c(out, "\U0001F7E2 Lifetime Mutual back on solid ground")
+  if (k == 1) {
+    n_all <- sum(sapply(res$info, function(x) x$N))
+    out <- c(out, paste0("Lifetime Mutual opens its doors: ", formatC(n_all, format = "d", big.mark = ","),
+                         " customers sign up"))
+  }
+  ae_line <- function(tab, high, low) {
+    e <- tab$expected_events[k]
+    if (e < 5) return(character(0))
+    ae <- tab$events[k] / e
+    if (ae >= 1.12) return(sprintf(high, round(100 * (ae - 1))))
+    if (ae <= 0.88) return(sprintf(low, round(100 * (1 - ae))))
+    character(0)
+  }
+  if (!is.null(res$tabs$di))
+    out <- c(out, ae_line(res$tabs$di, "Bad year for Disability Income: new claims %d%% above expected",
+                          "Healthy year: new disability claims %d%% below expected"))
+  if (!is.null(res$tabs$term))
+    out <- c(out, ae_line(res$tabs$term, "Term Life hit hard: deaths %d%% above expected",
+                          "Lucky year for Term Life: deaths %d%% below expected"))
+  if (!is.null(res$tabs$couple))
+    out <- c(out, ae_line(res$tabs$couple, "Annuity book gains: deaths among couples %d%% above expected",
+                          "Couples living longer: deaths %d%% below expected, so annuity costs rise"))
+  if (length(out) == 0) {
+    out <- if (co$profit[k] >= 0) paste0("Quiet year: Lifetime Mutual makes ", money_m(co$profit[k]))
+           else paste0("Quiet year, but Lifetime Mutual loses ", money_m(-co$profit[k]))
+  }
+  out
+}
+
+# ---------- Report card ----------
+report_card <- function(res, final_year) {
+  co <- res$co
+  final <- co[final_year, ]
+  bank <- res$capital * prod(1 + res$i_path[seq_len(final_year)])
+  pcts <- sapply(res$info, function(x) x$pct)
+  if (final$status == "Bankrupt") {
+    grade <- "F"
+    title <- "\U0001F4A5 The Cautionary Tale"
+    gain <- NA
+  } else {
+    gain <- final$surplus - bank
+    ratio <- gain / res$capital
+    grade <- if (ratio >= 0.5) "A" else if (ratio >= 0.15) "B" else if (ratio >= -0.05) "C" else "D"
+    title <- if (all(abs(pcts - 100) <= 3)) "\U0001F981 The Steady Hand"
+             else if (any(pcts < 97)) "\U0001F3B0 The Gambler"
+             else if (all(pcts >= 115)) "\U0001F422 Too Careful"
+             else "\U0001F4BC The Profit Maker"
+  }
+  helped <- 0
+  if (!is.null(res$tabs$di)) {
+    pe <- attr(res$tabs$di, "people")
+    helped <- helped + sum((!is.na(pe$sick_at) & pe$sick_at <= final_year) |
+                             (!is.na(pe$died_at) & pe$died_at <= final_year))
+  }
+  if (!is.null(res$tabs$term)) {
+    pe <- attr(res$tabs$term, "people")
+    helped <- helped + sum(pe$exit == "died" & pe$exit_year <= final_year)
+  }
+  if (!is.null(res$info$couple)) helped <- helped + res$info$couple$N
+  list(grade = grade, title = title, gain = gain, bank = bank, final = final,
+       paid = sum(co$claims[seq_len(final_year)]), helped = helped,
+       customers = sum(sapply(res$info, function(x) x$N)),
+       storm = res$hard && final$status != "Bankrupt")
 }
 
 status_colour <- c(Healthy = "#2a9d8f", Warning = "#e9a23b", Bankrupt = "#e63946")
 status_icon <- c(Healthy = "\U0001F7E2", Warning = "\U0001F7E1", Bankrupt = "\U0001F534")
+grade_colour <- c(A = "#2a9d8f", B = "#52b788", C = "#e9a23b", D = "#f4845f", F = "#e63946")
 
 card <- function(...) div(class = "game-card", ...)
 
-game_css <- tags$style(HTML("
-  .game-card { border: 1px solid #dee2e6; border-radius: 12px; padding: 18px 20px;
-               margin-bottom: 16px; background: #ffffff; }
-  .game-hero { text-align: center; padding: 40px 10px 20px 10px; }
-  .game-hero h1 { font-size: 2.4em; margin-bottom: 0.4em; }
-  .game-hero p { font-size: 1.15em; max-width: 640px; margin: 0 auto 1em auto; }
-  .locked { opacity: 0.55; }
-  .meter { color: white; border-radius: 12px; padding: 14px 20px; font-size: 1.3em;
-           margin-bottom: 14px; }
-  .verdict { border-radius: 12px; padding: 18px 22px; margin-top: 10px;
-             border: 2px solid #dee2e6; }
-  .big-number { font-size: 1.8em; font-weight: bold; }
-  .shelf .checkbox { border: 1px solid #dee2e6; border-radius: 12px; padding: 12px 16px;
-                     margin-bottom: 10px; }
-  .shelf .checkbox label { width: 100%; }
-"))
+game_head <- tags$head(
+  tags$link(rel = "stylesheet",
+            href = "https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600&family=Nunito:wght@400;700&display=swap"),
+  tags$script(src = "https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"),
+  tags$script(HTML("
+    Shiny.addCustomMessageHandler('confetti', function(x) {
+      if (typeof confetti !== 'function') return;
+      confetti({ particleCount: 180, spread: 90, origin: { y: 0.6 } });
+      setTimeout(function() { confetti({ particleCount: 120, spread: 120, origin: { y: 0.5 } }); }, 400);
+    });
+  ")),
+  tags$style(HTML("
+    body { background: #f7f5ef; }
+    h1, h2, h3, h4 { font-family: 'Fredoka', sans-serif; }
+    .game-card { border: none; border-radius: 16px; padding: 18px 22px; margin-bottom: 16px;
+                 background: #ffffff; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+    .game-hero { text-align: center; padding: 50px 10px 30px 10px; }
+    .game-hero h1 { font-size: 3em; margin-bottom: 0.3em; }
+    .game-hero p { font-size: 1.15em; max-width: 640px; margin: 0 auto 1em auto; }
+    .locked { opacity: 0.5; }
+    .meter { color: white; border-radius: 16px; padding: 14px 22px; font-size: 1.25em;
+             margin-bottom: 14px; font-family: 'Fredoka', sans-serif; }
+    .progress-track { background: rgba(255,255,255,0.3); border-radius: 8px; height: 10px; margin-top: 10px; }
+    .progress-fill { background: white; border-radius: 8px; height: 10px; transition: width 0.4s; }
+    .newspaper { background: #fffdf6; border: 2px solid #2b2b2b; border-radius: 6px; padding: 14px 18px;
+                 font-family: Georgia, 'Times New Roman', serif; min-height: 330px; }
+    .newspaper .masthead { text-align: center; border-bottom: 3px double #2b2b2b; margin-bottom: 10px;
+                           font-size: 1.6em; font-weight: bold; letter-spacing: 1px; }
+    .newspaper .dateline { text-align: center; font-size: 0.85em; font-style: italic; margin-bottom: 8px; }
+    .newspaper .lead { font-size: 1.35em; font-weight: bold; line-height: 1.25; margin-bottom: 8px; }
+    .newspaper .sub { font-size: 1em; margin-bottom: 4px; }
+    .newspaper .earlier { border-top: 1px solid #999; margin-top: 10px; padding-top: 6px; font-size: 0.85em; color: #555; }
+    .report { border-radius: 16px; padding: 20px 24px; margin-top: 10px; background: white;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.08); border-left: 10px solid #ccc; }
+    .grade { font-family: 'Fredoka', sans-serif; font-size: 4em; line-height: 1; color: white;
+             width: 1.6em; height: 1.6em; border-radius: 50%; display: flex; align-items: center;
+             justify-content: center; }
+    .big-number { font-size: 1.6em; font-weight: bold; }
+    .story { background: #f1f7f6; border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; }
+    .shelf .checkbox { background: white; border-radius: 16px; padding: 14px 18px; margin-bottom: 12px;
+                       box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+    .shelf .checkbox label { width: 100%; }
+    .btn { border-radius: 10px; margin: 3px; }
+    .navbar .nav-link.active, .navbar .nav-link:focus { color: #ffffff !important; font-weight: 700;
+                                                        border-bottom: 3px solid #ffffff; }
+    .chart-key { font-size: 0.85em; color: #555; margin-top: 6px; text-align: center; }
+    .key-item { white-space: nowrap; display: inline-block; }
+    .key-line { display: inline-block; width: 22px; height: 4px; vertical-align: middle;
+                margin: 0 6px 0 14px; border-radius: 2px; }
+    .key-box { display: inline-block; width: 22px; height: 12px; vertical-align: middle;
+               margin: 0 6px 0 14px; background: rgba(42,157,143,0.2); }
+    .report-top { display: flex; gap: 24px; align-items: flex-start; }
+    .grade { flex: 0 0 auto; }
+  "))
+)
 
 screen_welcome <- tabPanelBody("welcome",
   div(class = "game-hero",
@@ -261,7 +482,7 @@ screen_welcome <- tabPanelBody("welcome",
         the next 20 years with thousands of customers: some get sick, some die, some walk away,
         and interest rates may not be kind."),
       p("Price too low and the company goes bankrupt. Price too high and nobody buys."),
-      actionButton("go_shelf", "Start ▶", class = "btn-primary btn-lg"),
+      actionButton("go_shelf", "Start \u25B6", class = "btn-primary btn-lg"),
       br(), br(),
       p(em("An actuary works out what future promises cost today, using probability and interest.
            That's the whole game."))
@@ -285,8 +506,8 @@ screen_shelf <- tabPanelBody("shelf",
       "Customers choose what they pay. Coming later."),
   div(class = "game-card locked", strong("\U0001F512 Guaranteed Product (Chapter 7)"), br(),
       "A promise with a hidden cost. Coming later."),
-  actionButton("back_welcome", "◀ Back"),
-  actionButton("go_pricing", "Next: set prices ▶", class = "btn-primary")
+  actionButton("back_welcome", "\u25C0 Back"),
+  actionButton("go_pricing", "Next: set prices \u25B6", class = "btn-primary")
 )
 
 screen_pricing <- tabPanelBody("pricing",
@@ -299,27 +520,46 @@ screen_pricing <- tabPanelBody("pricing",
     radioButtons("outlook", NULL, choices = names(OUTLOOK), selected = "Expected (5%)", inline = TRUE)
   ),
   card(
+    h4("\u26A1 Hard mode"),
+    checkboxInput("hard", "Add one surprise event somewhere between years 5 and 14
+                  (a pandemic, a sickness wave, customers fleeing or a market crash)", value = FALSE),
+    p(em("Real insurers test their prices against shocks like these. That's called a stress test."))
+  ),
+  card(
+    h4("\U0001F3B2 Game number (optional)"),
+    p("Leave this blank for brand-new luck. To replay someone's game with exactly the same
+      customer lives, enter their game number and use the same products, prices, interest and hard mode."),
+    numericInput("game_no", NULL, value = NA, min = 1, max = 99999, step = 1, width = "200px")
+  ),
+  card(
     h4("\U0001F9FE Your costs"),
     p("Agents take 50% of the first year's premium and 5% after that. Each policy costs $200 to set up
       and $50 a year to run. The annuity costs 2% of its premium plus $500 to set up, then $50 a year.
       The fair price already includes these.")
   ),
-  actionButton("back_shelf", "◀ Back"),
-  actionButton("run", "Run the 20 years ▶", class = "btn-primary btn-lg")
+  actionButton("back_shelf", "\u25C0 Back"),
+  actionButton("run", "Run the 20 years \u25B6", class = "btn-primary btn-lg")
 )
 
 screen_years <- tabPanelBody("years",
   h2("3. The next 20 years"),
   uiOutput("meter"),
   fluidRow(
-    column(7, plotOutput("company_plot", height = "330px")),
-    column(5, uiOutput("events"))
+    column(7, card(plotOutput("company_plot", height = "330px"),
+                   div(class = "chart-key",
+                       span(class = "key-item", span(class = "key-line", style = "background:#2a9d8f;"),
+                            "Assets (colour = health)"),
+                       span(class = "key-item", span(class = "key-line", style = "background:#264653;"),
+                            "Reserves"),
+                       span(class = "key-item", span(class = "key-box"), "Gap = surplus")))),
+    column(5, uiOutput("newspaper"))
   ),
   uiOutput("verdict"),
   br(),
-  actionButton("skip", "Skip to the end ⏩"),
+  actionButton("skip", "Skip to the end \u23E9"),
   actionButton("reroll", "Same prices, different luck \U0001F3B2"),
-  actionButton("again", "Change my prices ↩", class = "btn-primary"),
+  actionButton("again", "Change my prices \u21A9"),
+  actionButton("play_again", "Play again \U0001F504", class = "btn-primary"),
   h4("The company's accounts"),
   p(em("All amounts for the year. Reserves are the money that must be set aside for future promises;
        surplus is what's left over.")),
@@ -327,7 +567,7 @@ screen_years <- tabPanelBody("years",
 )
 
 tab_game <- tabPanel("\U0001F3AE The Game",
-  game_css,
+  game_head,
   tabsetPanel(id = "screen", type = "hidden",
               screen_welcome, screen_shelf, screen_pricing, screen_years)
 )
@@ -396,30 +636,46 @@ game_server <- function(input, output, session) {
     })
   })
 
-  rv <- reactiveValues(res = NULL, year = 0, running = FALSE, prices = NULL)
+  rv <- reactiveValues(res = NULL, year = 0, running = FALSE, prices = NULL, game_no = NULL)
 
-  start_run <- function() {
+  # The game number is the random seed: same number + same choices = same lives
+  start_run <- function(game_no) {
+    rv$game_no <- game_no
     rv$res <- run_game(rv$prices$chosen, rv$prices$pct, OUTLOOK[[input$outlook]],
-                       seed = sample.int(1e6, 1))
+                       seed = game_no, hard = isTRUE(input$hard))
     rv$year <- 0
     rv$running <- TRUE
     go("years")
   }
 
   observeEvent(input$run, {
+    g <- input$game_no
+    if (is.null(g) || is.na(g)) {
+      g <- sample.int(99999, 1)
+    } else if (g < 1 || g > 99999 || g != round(g)) {
+      showNotification("A game number is a whole number from 1 to 99,999.", type = "warning")
+      return()
+    }
     pct_list <- lapply(input$chosen, function(id) {
       v <- input[[paste0("price_", id)]]
       if (is.null(v)) 100 else v
     })
     names(pct_list) <- input$chosen
     rv$prices <- list(chosen = input$chosen, pct = pct_list)
-    withProgress(message = "Simulating thousands of lives...", start_run())
+    withProgress(message = "Simulating thousands of lives...", start_run(as.integer(g)))
   })
   observeEvent(input$reroll, {
     req(rv$prices)
-    withProgress(message = "Simulating thousands of lives...", start_run())
+    withProgress(message = "Simulating thousands of lives...", start_run(sample.int(99999, 1)))
   })
   observeEvent(input$again, go("pricing"))
+  observeEvent(input$play_again, {
+    rv$running <- FALSE
+    rv$res <- NULL
+    rv$year <- 0
+    updateNumericInput(session, "game_no", value = NA)
+    go("shelf")
+  })
 
   # How far the story can go: the last year, or the year the company went bankrupt
   last_year <- reactive({
@@ -429,21 +685,25 @@ game_server <- function(input, output, session) {
     if (is.na(bust)) nrow(co) else bust
   })
 
-  observeEvent(input$skip, {
-    req(rv$res)
+  # The end of the game: stop the clock, and celebrate if the company survived
+  finish <- function() {
     rv$year <- last_year()
     rv$running <- FALSE
+    if (rv$res$co$status[rv$year] != "Bankrupt") session$sendCustomMessage("confetti", list())
+  }
+
+  observeEvent(input$skip, {
+    req(rv$res, rv$running)
+    finish()
   })
 
   # Reveal one year at a time
   observe({
     req(rv$running)
-    invalidateLater(450)
+    invalidateLater(500)
     isolate({
-      if (rv$year < last_year()) {
-        rv$year <- rv$year + 1
-      }
-      if (rv$year >= last_year()) rv$running <- FALSE
+      if (rv$year < last_year()) rv$year <- rv$year + 1
+      if (rv$year >= last_year()) finish()
     })
   })
 
@@ -455,69 +715,77 @@ game_server <- function(input, output, session) {
   output$meter <- renderUI({
     req(rv$res)
     if (rv$year == 0) {
-      return(div(class = "meter", style = "background:#457b9d;",
-                 paste("Year 0: you start with", money_m(rv$res$capital))))
+      status <- "Start"
+      colour <- "#457b9d"
+      text <- paste0("Game #", rv$game_no, "  |  Year 0: you start with ", money_m(rv$res$capital))
+    } else {
+      row <- shown()[rv$year, ]
+      status <- row$status
+      colour <- status_colour[[status]]
+      text <- paste0("Game #", rv$game_no, "  |  ", status_icon[[status]], "  Year ", row$year,
+                     " of ", HORIZON, ": ", status, "  |  Surplus ", money_m(row$surplus),
+                     "  |  Reserves ", money_m(row$reserve))
     }
-    row <- shown()[rv$year, ]
-    div(class = "meter", style = paste0("background:", status_colour[[row$status]], ";"),
-        paste0(status_icon[[row$status]], "  Year ", row$year, " of ", HORIZON, ": ", row$status,
-               "  |  Surplus ", money_m(row$surplus), "  |  Reserves ", money_m(row$reserve)))
+    div(class = "meter", style = paste0("background:", colour, ";"),
+        text,
+        div(class = "progress-track",
+            div(class = "progress-fill", style = paste0("width:", round(100 * rv$year / HORIZON), "%;"))))
   })
 
   output$company_plot <- renderPlot({
     req(rv$res)
     co <- rv$res$co
-    yr <- c(0, co$year)
     top <- max(c(rv$res$capital, co$assets, co$reserve)) * 1.05
     bottom <- min(0, co$assets[seq_len(last_year())])
-    par(mar = c(4, 5, 1, 1))
+    par(mar = c(4, 5, 1, 1), bg = "white")
     plot(NA, xlim = c(0, HORIZON), ylim = c(bottom, top) / 1e6,
-         xlab = "Year", ylab = "$ millions", las = 1)
-    abline(h = 0, col = "grey70")
+         xlab = "Year", ylab = "$ millions", las = 1, bty = "n")
+    abline(h = 0, col = "grey80")
+    if (!is.null(rv$res$shock)) {
+      abline(v = rv$res$shock$year - 0.5, col = "grey60", lty = 2)
+      text(rv$res$shock$year - 0.5, top / 1e6, "surprise", pos = 4, cex = 0.8, col = "grey40")
+    }
     if (rv$year > 0) {
       k <- 0:rv$year
       a <- c(rv$res$capital, co$assets[seq_len(rv$year)]) / 1e6
       r <- c(0, co$reserve[seq_len(rv$year)]) / 1e6
-      polygon(c(k, rev(k)), c(a, rev(r)), col = adjustcolor("#2a9d8f", 0.15), border = NA)
-      lines(k, a, lwd = 3, col = "#2a9d8f")
-      lines(k, r, lwd = 3, col = "#e76f51")
+      polygon(c(k, rev(k)), c(a, rev(r)), col = adjustcolor("#2a9d8f", 0.12), border = NA)
+      lines(k, r, lwd = 3, col = "#264653")
+      # the assets line changes colour with the company's health
+      for (j in seq_len(rv$year)) {
+        segments(j - 1, a[j], j, a[j + 1], lwd = 4, col = status_colour[[co$status[j]]])
+      }
     }
-    legend("topleft", legend = c("Assets (what the company owns)", "Reserves (what it must hold)",
-                                 "Shaded gap = surplus"),
-           col = c("#2a9d8f", "#e76f51", adjustcolor("#2a9d8f", 0.3)), lwd = c(3, 3, 10), bty = "n")
   })
 
-  output$events <- renderUI({
+  output$newspaper <- renderUI({
     req(rv$res)
-    if (rv$year == 0) return(card(p("Starting the clock...")))
-    co <- shown()
-    msgs <- list()
-    for (k in seq_len(nrow(co))) {
-      if (co$status[k] == "Warning" && (k == 1 || co$status[k - 1] == "Healthy")) {
-        msgs[[length(msgs) + 1]] <- paste0("Year ", k, ": \U0001F7E1 the surplus is thin. The regulator is watching.")
-      }
-      if (co$status[k] == "Healthy" && k > 1 && co$status[k - 1] == "Warning") {
-        msgs[[length(msgs) + 1]] <- paste0("Year ", k, ": \U0001F7E2 back to healthy.")
-      }
-      if (co$status[k] == "Bankrupt") {
-        msgs[[length(msgs) + 1]] <- paste0("Year ", k, ": \U0001F534 assets fell below reserves. The regulator shuts the company.")
-      }
+    if (rv$year == 0) {
+      lead <- "Lifetime Mutual names a new Chief Actuary"
+      subs <- character(0)
+      earlier <- character(0)
+    } else {
+      today <- headlines_for_year(rv$res, rv$year)
+      lead <- today[1]
+      subs <- today[-1]
+      prev <- if (rv$year > 1) rev(seq_len(rv$year - 1)) else integer(0)
+      prev <- head(prev, 4)
+      earlier <- vapply(prev, function(k) paste0("Year ", k, ": ", headlines_for_year(rv$res, k)[1]),
+                        character(1))
     }
-    worst <- which.min(co$profit)
-    if (co$profit[worst] < 0) {
-      msgs[[length(msgs) + 1]] <- paste0("Worst year so far: year ", worst, ", a loss of ",
-                                         money_m(-co$profit[worst]), ".")
-    }
-    if (length(msgs) == 0) msgs <- list("So far, so good.")
-    card(h4("What happened"), tags$ul(lapply(msgs, tags$li)))
+    div(class = "newspaper",
+        div(class = "masthead", "THE DAILY ACTUARY"),
+        div(class = "dateline", paste0("Year ", rv$year, " \u00B7 Game #", rv$game_no)),
+        div(class = "lead", lead),
+        lapply(subs, function(s) div(class = "sub", paste("\u2022", s))),
+        if (length(earlier) > 0) div(class = "earlier", strong("Earlier"),
+                                     lapply(earlier, function(s) div(s))))
   })
 
   output$verdict <- renderUI({
     req(rv$res, !rv$running, rv$year > 0)
     res <- rv$res
-    co <- res$co
-    final <- co[rv$year, ]
-    bank <- res$capital * (1 + res$i_earn)^rv$year
+    rc <- report_card(res, rv$year)
     reasons <- lapply(names(res$info), function(id) {
       inf <- res$info[[id]]
       nm <- products[[id]]$name
@@ -532,27 +800,49 @@ game_server <- function(input, output, session) {
         paste0(nm, ": priced at fair, so it breaks even on average (", cust, " customers). Any gain or loss here is luck.")
       }
     })
-    if (res$i_earn < I_PRICE) {
-      reasons[[length(reasons) + 1]] <- paste0("Interest: you earned ", res$i_earn * 100,
+    if (res$outlook < I_PRICE) {
+      reasons[[length(reasons) + 1]] <- paste0("Interest: you earned ", res$outlook * 100,
         "% instead of the 5% you priced with, so investment income fell short every year.")
-    } else if (res$i_earn > I_PRICE) {
-      reasons[[length(reasons) + 1]] <- paste0("Interest: you earned ", res$i_earn * 100,
+    } else if (res$outlook > I_PRICE) {
+      reasons[[length(reasons) + 1]] <- paste0("Interest: you earned ", res$outlook * 100,
         "% instead of 5%, a tailwind every year.")
     }
-    if (final$status == "Bankrupt") {
-      headline <- h3(paste0("❌ Bankrupt in year ", final$year))
-      border <- status_colour[["Bankrupt"]]
+    if (!is.null(res$shock) && res$shock$year <= rv$year) {
+      reasons[[length(reasons) + 1]] <- paste0("\u26A1 Surprise in year ", res$shock$year, ": ", res$shock$why)
+    }
+    if (rc$final$status == "Bankrupt") {
+      headline <- h3(paste0("\u274C Bankrupt in year ", rc$final$year))
       score <- p("The company could no longer cover its promises to customers.")
     } else {
-      gain <- final$surplus - bank
-      headline <- h3(paste0("✅ Survived all ", HORIZON, " years"))
-      border <- status_colour[["Healthy"]]
-      score <- p("Final surplus ", strong(money_m(final$surplus)), ". Left in the bank, the starting capital would have grown to ",
-                 money_m(bank), ", so the business ", if (gain >= 0) "added " else "cost ",
-                 span(class = "big-number", money_m(abs(gain))), ".")
+      headline <- h3(paste0("\u2705 Survived all ", HORIZON, " years"))
+      score <- p(HTML(paste0("Final surplus <strong>", money_m(rc$final$surplus),
+                             "</strong>. Left in the bank, the starting capital would have grown to ",
+                             money_m(rc$bank), ", so the business ",
+                             if (rc$gain >= 0) "added " else "cost ",
+                             "<span class='big-number'>", money_m(abs(rc$gain)), "</span>.")))
     }
-    div(class = "verdict", style = paste0("border-color:", border, ";"),
-        headline, score, h4("Why"), tags$ul(lapply(reasons, tags$li)))
+    div(class = "report", style = paste0("border-left-color:", grade_colour[[rc$grade]], ";"),
+        div(class = "report-top",
+          div(class = "grade", style = paste0("background:", grade_colour[[rc$grade]], ";"),
+              rc$grade),
+          div(headline, h4(rc$title),
+                 if (rc$storm) p(strong("\u26C8 Badge: Storm Survivor."), " You came through a surprise event."),
+                 score,
+                 p(HTML(paste0("\U0001F91D You sold to <strong>",
+                               formatC(rc$customers, format = "d", big.mark = ","),
+                               "</strong> customers, paid out <strong>", money_m(rc$paid),
+                               "</strong> in benefits, and <strong>",
+                               formatC(rc$helped, format = "d", big.mark = ","),
+                               "</strong> of them received a payout."))))
+        ),
+        h4("Why"),
+        tags$ul(lapply(reasons, tags$li)),
+        if (length(res$stories) > 0) tagList(
+          h4("\U0001F464 Three of your customers"),
+          lapply(res$stories, function(s) div(class = "story", s))
+        ),
+        p(em(paste0("This was game #", rv$game_no, ". Share the number with your prices, interest and
+                    hard mode choice, and anyone can replay exactly the same luck."))))
   })
 
   output$year_table <- renderTable({
@@ -576,7 +866,8 @@ game_server <- function(input, output, session) {
 ui <- navbarPage(
   title = "The Odds of a Lifetime",
   windowTitle = "The Odds of a Lifetime",
-  theme = bslib::bs_theme(bootswatch = "flatly"),
+  theme = bslib::bs_theme(bootswatch = "flatly", primary = "#2a9d8f",
+                         base_font = "Nunito, sans-serif", heading_font = "Fredoka, sans-serif"),
   tab_game,
   tab_how
 )
